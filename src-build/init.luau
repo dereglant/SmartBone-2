@@ -1,724 +1,746 @@
---!nocheck
+--[[ SmartBone Version 0.2.0 - Enhanced with Bone Groups by EliD3v ( roblox : elo2_0 )  ]] --
 
-local CollectionService = game:GetService("CollectionService")
-local HttpService = game:GetService("HttpService")
-local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local Components = script:WaitForChild("Components")
-local Dependencies = script:WaitForChild("Dependencies")
+type func = () -> ()
+type dictionary = { [string]: any }
+type array = { [number]: any }
 
-local CeiveImOverlay = require(Dependencies:WaitForChild("Debug"):WaitForChild("ImOverlay"))
-local Config = require(Dependencies:WaitForChild("Config"))
-local Frustum = require(Dependencies:WaitForChild("Frustum"))
-local Utilities = require(Dependencies:WaitForChild("Utilities"))
-local ImOverlay
-
-local BoneClass = require(Components:WaitForChild("Bone"))
-local BoneTreeClass = require(Components:WaitForChild("BoneTree"))
-local ColliderObjectClass = require(Components:WaitForChild("Collision"):WaitForChild("ColliderObject"))
-
-local ActorRuntime = Dependencies:WaitForChild("Runtime")
-
-local function CopyPasteAttributes(Object1: BasePart, Object2: BasePart)
-	for k, v in Object1:GetAttributes() do
-		Object2:SetAttribute(k, v)
-	end
-end
-
-export type IBoneTree = BoneTreeClass.IBoneTree
-export type IBone = BoneClass.IBone
-export type IColliderObject = ColliderObjectClass.IColliderObject
-export type IColliderTable = ColliderObjectClass.IColliderTable
-
-type ImOverlay = {
-	Begin: (Text: string, BackgroundColor: Color3?, TextColor: Color3?) -> (),
-	End: () -> (),
-	Text: (Text: string, BackgroundColor: Color3?, TextColor: Color3?) -> ()
+type rootList = {
+	[number]: Bone
 }
 
-type bool = boolean
+type boneGroup = {
+	Name: string,
+	Roots: {Bone},
+	Settings: dictionary,
+}
 
-local SB_INDENT_LOG = Utilities.SB_INDENT_LOG
-local SB_UNINDENT_LOG = Utilities.SB_UNINDENT_LOG
--- local SB_ASSERT_CB = Utilities.SB_ASSERT_CB
-local SB_VERBOSE_LOG = Utilities.SB_VERBOSE_LOG
-local SB_VERBOSE_WARN = Utilities.SB_VERBOSE_WARN
--- local SB_VERBOSE_ERROR = Utilities.SB_VERBOSE_ERROR
+type particle = {
+	Bone: Bone,
+	RestLength: number,
+	Weight: number,
+	ParentIndex: number,
+	Transform: CFrame,
+	LocalTransform: CFrame,
+	RootTransform: CFrame,
+	Radius: number,
+	IsColliding: boolean,
+	BoneLength: number,
+	HeirarchyLength: number,
+	DebugPart: BasePart,
+	GroupName: string,
 
---- @class SmartBone
---- Root for all SmartBone objects.
+	TransformOffset: CFrame,
+	LastTransformOffset: CFrame,
+	LocalTransformOffset: CFrame,
+	RestPosition: Vector3,
+	BoneTransform: CFrame,
+	CalculatedWorldCFrame: CFrame,
+	CalculatedWorldPosition: Vector3,
 
---- @within SmartBone
---- @readonly
---- @prop ID string
---- Unique ID of the root object
+	Position: Vector3,
+	LastPosition: Vector3,
+	Anchored: boolean,
+	RecyclingBin: any,
+}
+type particleArray = {
+	[number]: particle
+}
+type particleTree = {
+	WindOffset: number,
+	Root: Bone,
+	RootPart: BasePart,
+	RootWorldToLocal: Vector3,
+	BoneTotalLength: number,
+	Particles: particleArray,
+	LocalCFrame: CFrame,
+	LocalGravity: Vector3,
+	Force: Vector3,
+	RestGravity: Vector3,
+	ObjectMove: Vector3,
+	ObjectPreviousPosition: Vector3,
+	GroupName: string,
+}
 
---- @within SmartBone
---- @prop BoneTrees table
---- Table of all bone trees under this root
+-- // Services \\ --
 
---- @within SmartBone
---- @prop ColliderObjects table
---- Table of all colliders assigned to this root
+local Lighting = game:GetService("Lighting")
+local CollectionService = game:GetService("CollectionService")
+local RunService = game:GetService("RunService")
 
---- @within SmartBone
---- @prop ShouldDestroy boolean
---- True if the root has no bonetrees, this is already handled by the runtime
+if not RunService:IsClient() then 
+	warn("Attempted to initialize SmartBone on Server.") 
+	return nil
+end
 
-local Class = {}
-Class.__index = Class
+-- // Constructors \\ --
 
---- @within SmartBone
---- @return SmartBone
-function Class.new()
+local ZERO = Vector3.zero
+
+-- // Dependencies \\ --
+
+local Dependencies = script:WaitForChild("Dependencies")
+local Components = script:WaitForChild("Components")
+
+local Config = require(Dependencies.Config)
+
+local UnitConversion = require(Dependencies.UnitConversion)
+local DefaultSettings = require(Dependencies.DefaultSettings)
+
+local ParticleTree = require(Components.ParticleTree)
+local Particle = require(Components.Particle)
+
+local SettingsMath = require(Dependencies.SettingsMath)
+local Utilities = require(Dependencies.Utilities)
+
+local NEXT_ID = 1
+
+local SmartBoneTags = CollectionService:GetTagged("SmartBone")
+
+-- // Debug \\ --
+
+local DEBUG = Config.Debug
+local DEBUG_FOLDER, DEBUG_HIGHLIGHT
+
+if DEBUG then
+	DEBUG_FOLDER = Instance.new("Model")
+	DEBUG_FOLDER.Name = "SMARTBONE_DEBUGFOLDER"
+	DEBUG_FOLDER.Parent = workspace
+
+	DEBUG_HIGHLIGHT = Instance.new("Highlight")
+	DEBUG_HIGHLIGHT.FillColor = Color3.fromRGB(255, 0, 0)
+	DEBUG_HIGHLIGHT.OutlineTransparency = 1
+	DEBUG_HIGHLIGHT.FillTransparency = 0
+	DEBUG_HIGHLIGHT.Parent = DEBUG_FOLDER
+	DEBUG_HIGHLIGHT.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	DEBUG_HIGHLIGHT.Enabled = true
+end
+
+-- // Module \\ --
+
+local CurrentControllers = {}
+local module = {}
+module.__index = module
+
+function module.new(rootPart: BasePart, boneGroups: {boneGroup})
 	local self = setmetatable({
-		ID = HttpService:GenerateGUID(false),
-		BoneTrees = {},
-		ColliderObjects = {},
-		ShouldDestroy = false,
-	}, Class)
+		ID = NEXT_ID,
+		RootPart = rootPart,
+		Time = {},
+		ParticleTrees = {},
+		Connections = {},
+		BoneGroups = boneGroups,
+		ObjectScale = UnitConversion.Convert(math.abs(rootPart.Size.X), "Millimeter"),
+		WindPreviousPosition = Vector3.zero,
+		Removed = false,
+		RemovedEvent = Instance.new("BindableEvent"),
+		InRange = false,
+
+		Settings = {},
+		GroupSettings = {},
+	}, module)
+
+	-- Initialize default settings for the root part
+	for name, value in DefaultSettings do
+		self.Settings[name] = rootPart:GetAttribute(name) or value
+	end
+
+	self.Settings.BlendWeight = 1
+	self.Settings.UpdateRate = math.floor(self.Settings.UpdateRate + 0.1)
+
+	-- Initialize settings for each group
+	for _, group in ipairs(boneGroups) do
+		self.GroupSettings[group.Name] = {}
+		self.Time[group.Name] = 0
+		
+		for name, value in DefaultSettings do
+			-- Check for group-specific attributes first, then fall back to group settings, then default
+			local attributeName = group.Name .. "_" .. name
+			self.GroupSettings[group.Name][name] = rootPart:GetAttribute(attributeName) 
+				or group.Settings[name] 
+				or self.Settings[name]
+		end
+		
+		self.GroupSettings[group.Name].BlendWeight = 1
+		self.GroupSettings[group.Name].UpdateRate = math.floor(self.GroupSettings[group.Name].UpdateRate + 0.1)
+	end
+
+	self:Init()
+	self:UpdateParameters(self.Settings)
+
+	-- Increment ID for next instance
+	NEXT_ID = NEXT_ID + 1
 
 	return self
 end
 
--- Private Functions
+function module:Init()
+	local RootPart = self.RootPart
 
---- @private
---- @within SmartBone
---- @param BoneTree table
---- @param BoneObject Bone
---- @param ParentIndex number
---- @param HeirarchyLength number
---- :::caution Caution:
---- Private Functions can change syntax at any time without warning. Only use these if you're prepared to fix any issues that arise.
---- :::
---- Used to add a bone to the provided bone tree
-function Class:m_AppendBone(BoneTree: IBoneTree, BoneObject: Bone, ParentIndex: number, HeirarchyLength: number)
-	local Settings = Utilities.GatherBoneSettings(BoneObject)
-	local Bone: IBone = BoneClass.new(BoneObject, BoneTree.Root, BoneTree.RootPart)
+	local tailBone, start
 
-	for k, v in Settings do
-		-- "¬" represents a nil value, this is done so we can delete attributes at runtime.
-		Bone[k] = (v ~= "¬") and v or nil
-	end
+	CurrentControllers[self.ID] = self
 
-	local ParentBone = BoneTree.Bones[ParentIndex]
-
-	if ParentIndex > 0 then
-		local BoneLength = (ParentBone.Position - Bone.Position).Magnitude
-		Bone.FreeLength = BoneLength
-		Bone.Weight = BoneLength * 0.7 -- Why 0.7?
-		Bone.HeirarchyLength = HeirarchyLength
-
-		ParentBone.HasChild = true
-		--ParentBone.NumberOfChildren += 1
-	end
-
-	if HeirarchyLength <= BoneTree.Settings.AnchorDepth then
-		SB_VERBOSE_LOG("Anchoring bone")
-		Bone.Anchored = true
-	end
-
-	Bone.ParentIndex = ParentIndex
-
-	table.insert(BoneTree.Bones, Bone)
-end
-
---- @private
---- @within SmartBone
---- @param RootPart BasePart
---- @param RootBone Bone
---- :::caution Caution:
---- Private Functions can change syntax at any time without warning. Only use these if you're prepared to fix any issues that arise.
---- :::
---- Creates a bone tree from the RootPart and RootBone and then adds all child bones via m_AppendBone
-function Class:m_CreateBoneTree(RootPart: BasePart, RootBone: Bone)
-	local BoneTree = BoneTreeClass.new(RootBone, RootPart, Utilities.GatherObjectSettings(RootPart))
-
-	SB_VERBOSE_LOG(`Creating bone tree {RootPart.Name}; {RootBone.Name}`)
-	SB_INDENT_LOG()
-
-	local function AddChildren(Bone, ParentIndex, HeirarchyLength)
-		SB_VERBOSE_LOG(`Adding bone: {Bone.Name}; {ParentIndex}; {HeirarchyLength}`)
-		SB_INDENT_LOG()
-		local Children = Bone:GetChildren()
-		local HasBoneChild = false
-
-		for _, Child in Children do
-			if Child:IsA("Bone") then
-				self:m_AppendBone(BoneTree, Child, ParentIndex, HeirarchyLength)
-
-				AddChildren(Child, #BoneTree.Bones, HeirarchyLength + 1)
-				HasBoneChild = true
-			end
-		end
-
-		if string.sub(Bone.Name, #Bone.Name - 3, #Bone.Name) == "_end" or string.sub(Bone.Name, #Bone.Name - 4, #Bone.Name) == "_Tail" then
-			HasBoneChild = true
-		end
-
-		if not HasBoneChild then -- Add tail bone for transform calculations
-			SB_VERBOSE_LOG(`Adding tail bone`)
-			local Parent = Bone.Parent
-			local ParentWorldPosition = Parent:IsA("Bone") and Parent.WorldPosition or Parent.Position
-
-			local Start = Bone.WorldCFrame + (Bone.WorldCFrame.UpVector.Unit * (Bone.WorldPosition - ParentWorldPosition).Magnitude)
-			local tailBone = Instance.new("Bone")
-			tailBone.Parent = Bone
-			tailBone.Name = Bone.Name .. "_Tail"
-			tailBone.WorldCFrame = Start
-
-			CopyPasteAttributes(Bone, tailBone)
-
-			self:m_AppendBone(BoneTree, tailBone, #BoneTree.Bones, HeirarchyLength)
-		end
-
-		SB_UNINDENT_LOG()
-	end
-
-	self:m_AppendBone(BoneTree, RootBone, 0, 0)
-
-	AddChildren(RootBone, 1, 1)
-
-	table.insert(self.BoneTrees, BoneTree)
-
-	SB_UNINDENT_LOG()
-end
-
---- @private
---- @within SmartBone
---- :::caution Caution:
---- Private Functions can change syntax at any time without warning. Only use these if you're prepared to fix any issues that arise.
---- :::
---- Updates the view frustum used for optimization
-function Class:m_UpdateViewFrustum()
-	-- Should we do frustum checks this frame, depends on config setting
-	if shared.FrameCounter % Config.FRUSTUM_FREQ ~= 0 then
-		return
-	end
-	
-
-local a, b, c, d, e, f, g, h, i = Frustum.GetCFrames(workspace.CurrentCamera, Config.FAR_PLANE) -- Hard coded stud limit on any object
-
-	for _, BoneTree in self.BoneTrees do
-		
-local FakeObject = {
-			CFrame = BoneTree.BoundingBoxCFrame,
-			Size = BoneTree.BoundingBoxSize,
-		}
-		BoneTree.InView = Frustum.ObjectInFrustum(FakeObject, a, b, c, d, e, f, g, h, i)
-	
-end
-
-end
-
-function Class:m_CleanColliders()
-	
-local DidDestroy = false
-
-	if #self.ColliderObjects ~= 0 then -- Micro optimizations
-		for i, ColliderObject in self.ColliderObjects do
-			if #ColliderObject.Colliders == 0 or ColliderObject.Destroyed == true then
-				SB_VERBOSE_WARN(`Deleting Collider Object`)
-				SB_INDENT_LOG()
-				ColliderObject:Destroy()
-				SB_UNINDENT_LOG()
-				table.remove(self.ColliderObjects, i)
-
-				DidDestroy = true
-			end
-		end
-	end
-
-	if not DidDestroy then -- Prevent warning because we left parallel
-	
-end
-end
-
---- @private
---- @within SmartBone
---- @param BoneTree table
---- @param Index number
---- @param Delta number
---- :::caution Caution:
---- Private Functions can change syntax at any time without warning. Only use these if you're prepared to fix any issues that arise.
---- :::
---- Updates the provided bone tree with all optimizations
-function Class:m_UpdateBoneTree(BoneTree: IBoneTree, Index: number, Delta: number)
-
-	
-if BoneTree.Destroyed then
-		BoneTree:Destroy()
-		table.remove(self.BoneTrees, Index)
-
-		return
-	end
-
-	BoneTree:PreUpdate(Delta) -- Pre update MUST be called before we call SkipUpdate!
-
-	if not BoneTree.InView or math.floor(BoneTree.UpdateRate) == 0 or not BoneTree.InWorkspace then
-		local AlreadySkipped = BoneTree.IsSkippingUpdates
-
-		BoneTree:SkipUpdate()
-
-		if not AlreadySkipped then
-
-			
-task.synchronize()
-			BoneTree:ApplyTransform()
-
-			SB_VERBOSE_LOG(
-				`Skipping BoneTree, InView: {BoneTree.InView}, Update Rate == 0: {math.floor(BoneTree.UpdateRate) == 0}, InWorkspace: {BoneTree.InWorkspace}`
-			)
-		end
-
-		return
-	end
-	
-
-for _, ColliderObject in self.ColliderObjects do
-		ColliderObject:Step()
-	end
-
-	
-local UpdateHz = 1 / BoneTree.UpdateRate
-	local DidUpdate = false
-
-	BoneTree.AccumulatedDelta += Delta
-	while BoneTree.AccumulatedDelta > UpdateHz do
-		BoneTree.AccumulatedDelta -= UpdateHz
-
-		DidUpdate = true
-
-		BoneTree:StepPhysics(UpdateHz)
-		BoneTree:Constrain(self.ColliderObjects, UpdateHz)
-		BoneTree:SolveTransform(UpdateHz)
-	end
-
-	
-if DidUpdate then
-		task.synchronize()
-		BoneTree:ApplyTransform()
-	end
-end
-
---- @private
---- @within SmartBone
---- @return boolean
---- :::caution Caution:
---- Private Functions can change syntax at any time without warning. Only use these if you're prepared to fix any issues that arise.
---- :::
---- Returns true if the root should be destroyed
-function Class:m_CheckDestroy()
-	self.ShouldDestroy = false
-
-	if #self.BoneTrees == 0 then
-		self.ShouldDestroy = true
-		return true
-	end
-
-	return false
-end
-
--- Public Functions
-
---- @within SmartBone
---- @param Object BasePart
---- Loads the provided object
-function Class:LoadObject(Object: BasePart)
-	local RootAttribute = Object:GetAttribute("Roots")
-
-	if not RootAttribute then
-		warn(`[SmartBone2::LoadObject] Cannot load an object with no roots defined {Object.Name}`)
-		return
-	end
-
-	local RootNames = RootAttribute:split(",")
-	local Bones = {}
-
-	-- Gather bones into table indexed with name
-	for _, Descendant in Object:QueryDescendants("Bone") do
-		if Bones[Descendant.Name] then
-			warn(`[SmartBone2::LoadObject] Duplicate bones of name: {Descendant.Name} in RootPart: {Object.Name}`)
-			continue
-		end
-
-		Bones[Descendant.Name] = Descendant
-	end
-
-	-- Create bone trees
-	for _, Name in RootNames do
-		local RootBone = Bones[Name]
-		if not RootBone then
-			warn(`[SmartBone2::LoadObject] Couldn't find Root Bone of name: {Name} in RootPart: {Object.Name}`)
-			continue
-		end
-
-		self:m_CreateBoneTree(Object, RootBone)
-	end
-end
-
---- @within SmartBone
---- @param ColliderModule ModuleScript
---- @param Object BasePart
---- Loads the provided collider module onto the provided object
-function Class:LoadColliderModule(ColliderModule: ModuleScript, Object: BasePart)
-	assert(ColliderModule, "[SmartBone2::LoadColliderModule] No collider module passed in")
-
-	local RawColliderData = require(ColliderModule)
-	local ColliderData = HttpService:JSONDecode(RawColliderData)
-
-	local ColliderObject = ColliderObjectClass.new(ColliderData, Object)
-
-	table.insert(self.ColliderObjects, ColliderObject)
-end
-
---- @within SmartBone
---- @param ColliderData table
---- @param Object BasePart
---- Loads the raw collider data onto the provided object
-function Class:LoadRawCollider(ColliderData: IColliderTable, Object: BasePart)
-	local ColliderObject = ColliderObjectClass.new(ColliderData, Object)
-
-	table.insert(self.ColliderObjects, ColliderObject)
-end
-
---- @within SmartBone
---- Resets all bone trees to their rest position
-function Class:SkipUpdate()
-	
-for _, BoneTree in self.BoneTrees do
-		BoneTree:SkipUpdate()
-	end
-
-end
-
---- @within SmartBone
---- @param Delta number
---- Updates all bone trees
-function Class:StepBoneTrees(Delta: number)
-	if self:m_CheckDestroy() then
-		return
-	end
-
-	if Delta <= 0 then
-		SB_VERBOSE_WARN("DeltaTime is zero or sub zero, not updating.")
-		return
-	end
-
-	self:m_CleanColliders()
-	self:m_UpdateViewFrustum()
-	for i, BoneTree in self.BoneTrees do
-		self:m_UpdateBoneTree(BoneTree, i, Delta)
-	end
-end
-
---- @client
---- @within SmartBone
---- @param DRAW_COLLIDERS boolean
---- @param DRAW_CONTACTS boolean
---- @param DRAW_PHYSICAL_BONE boolean
---- @param DRAW_BONE boolean
---- @param DRAW_AXIS_LIMITS boolean
---- @param DRAW_ROOT_PART boolean
---- @param DRAW_FILL_COLLIDERS boolean
---- @param DRAW_COLLIDER_INFLUENCE boolean
---- @param DRAW_COLLIDER_AWAKE boolean
---- @param DRAW_COLLIDER_BROADPHASE boolean
---- @param DRAW_BOUNDING_BOX boolean
---- @param DRAW_ROTATION_LIMITS boolean
---- @param DRAW_ACCELERATION_INFO boolean
---- Draws the debug gizmos
-function Class:DrawDebug(
-	DRAW_COLLIDERS: bool,
-	DRAW_CONTACTS: bool,
-	DRAW_PHYSICAL_BONE: bool,
-	DRAW_BONE: bool,
-	DRAW_AXIS_LIMITS: bool,
-	DRAW_ROOT_PART: bool,
-	DRAW_FILL_COLLIDERS: bool,
-	DRAW_COLLIDER_INFLUENCE: bool,
-	DRAW_COLLIDER_AWAKE: bool,
-	DRAW_COLLIDER_BROADPHASE: bool,
-	DRAW_BOUNDING_BOX: bool,
-	DRAW_ROTATION_LIMITS: bool,
-	DRAW_ACCELERATION_INFO: bool
-)
-	for _, BoneTree in self.BoneTrees do
-		BoneTree:DrawDebug(
-			DRAW_CONTACTS,
-			DRAW_PHYSICAL_BONE,
-			DRAW_BONE,
-			DRAW_AXIS_LIMITS,
-			DRAW_ROOT_PART,
-			DRAW_BOUNDING_BOX,
-			DRAW_ROTATION_LIMITS,
-			DRAW_ACCELERATION_INFO
-		)
-	end
-
-	if DRAW_COLLIDERS then
-		for _, ColliderObject in self.ColliderObjects do
-			ColliderObject:DrawDebug(DRAW_FILL_COLLIDERS, DRAW_COLLIDER_INFLUENCE, DRAW_COLLIDER_AWAKE, DRAW_COLLIDER_BROADPHASE)
-		end
-	end
-end
-
---- @client
---- @within SmartBone
---- @param Overlay ImOverlay
---- Draws the debug overlay
-function Class:DrawOverlay(Overlay: ImOverlay)
-	if not Config.DEBUG_OVERLAY_ENABLED then
-		return
-	end
-
-	local INSTANCE_BACKGROUND_COLOR = Color3.new(1.000000, 0.431373, 0.713725)
-	local INSTANCE_TEXT_COLOR = Color3.new(1, 1, 1)
-	local ROOT_BACKGROUND_COLOR = Color3.new(0.486275, 0.431373, 1.000000)
-	local ROOT_TEXT_COLOR = Color3.new(1, 1, 1)
-
-	Overlay.Begin(`SmartBone Instance ID: {self.ID}`, INSTANCE_BACKGROUND_COLOR, INSTANCE_TEXT_COLOR)
-	Overlay.Text(`Frame Counter: {shared.FrameCounter}`)
-
-	if Config.DEBUG_OVERLAY_TREE then
-		for i, BoneTree in self.BoneTrees do
-			if Config.DEBUG_OVERLAY_MAX_TREES > 0 then
-				if Config.DEBUG_OVERLAY_TREE_OFFSET + Config.DEBUG_OVERLAY_MAX_TREES <= i then
-					break
-				end
-			end
-
-			if Config.DEBUG_OVERLAY_TREE_OFFSET > i then
-				continue
-			end
-
-			Overlay.Begin(`Bone Tree {i}`, ROOT_BACKGROUND_COLOR, ROOT_TEXT_COLOR)
-			BoneTree:DrawOverlay(Overlay)
-			Overlay.End()
-		end
-	end
-
-	Overlay.End()
-end
-
---- @within SmartBone
---- Destroys the root and all its children
-function Class:Destroy()
-	SB_VERBOSE_LOG("Deleting SmartBone Object")
-
-	for _, BoneTree in self.BoneTrees do
-		BoneTree:Destroy()
-	end
-
-	for _, ColliderObject in self.ColliderObjects do
-		ColliderObject:Destroy()
-	end
-
-	setmetatable(self, nil)
-end
-
---- @client
---- @within SmartBone
---- @return {Stop: () -> ()}
---- Collects all SmartBone objects and SmartBone colliders and starts running physics + collision on them
-function Class.Start(): { Stop: () -> () }
-	if not RunService:IsClient() then
-		warn("Smartbone.Start() can only be called in client context.")
-		return
-	end
-
-	if Class.Running then
-		warn("Cannot call Smartbone.Start() multiple times")
-		return
-	end
-
-	if Config.STARTUP_PRINT_ENABLED or Config.LOG_VERBOSE then
-		print(`SmartBone2 v{Config.VERSION} Starting`)
-	end
-
-	Class.Running = true
-
-	local Player = Players.LocalPlayer
-	local PlayerScripts = Player:WaitForChild("PlayerScripts")
-
-	local ActorFolder = Instance.new("Folder")
-	ActorFolder.Name = "SmartBone-Actors"
-	ActorFolder.Parent = PlayerScripts
-
-	local OverlayEvent = Instance.new("BindableEvent")
-	OverlayEvent.Name = "OverlayEvent"
-	OverlayEvent.Parent = script
-
-	OverlayEvent.Event:Connect(function(Type, ...)
-		if not Config.DEBUG_OVERLAY_ENABLED then
+	self.Connections["AttributeChanged"] = RootPart.AttributeChanged:ConnectParallel(function(Attribute: string)
+		-- Check if it's a global setting
+		if self.Settings[Attribute] then
+			self:UpdateParameters(Attribute, RootPart:GetAttribute(Attribute))
 			return
 		end
-
-		if Type == "Text" then
-			ImOverlay:Text(...)
-		elseif Type == "Begin" then
-			ImOverlay:Begin(...)
-		elseif Type == "End" then
-			ImOverlay:End()
+		
+		-- Check if it's a group-specific setting
+		for groupName, groupSettings in pairs(self.GroupSettings) do
+			local prefix = groupName .. "_"
+			if string.sub(Attribute, 1, #prefix) == prefix then
+				local settingName = string.sub(Attribute, #prefix + 1)
+				if groupSettings[settingName] then
+					self:UpdateGroupParameters(groupName, settingName, RootPart:GetAttribute(Attribute))
+				end
+				return
+			end
 		end
 	end)
 
-	local ObjectToActor: { [BasePart]: Actor } = {}
-	local ActorPool: { Actor } = {}
+	self.Connections["LightingAttributeChanged"] = Lighting.AttributeChanged:ConnectParallel(function(Attribute: string)
+		if not self.Settings[Attribute] then return end
+		self:UpdateParameters(Attribute, Lighting:GetAttribute(Attribute))
+	end)
 
-	local function GetActor(): Actor
-		return table.remove(ActorPool) or Instance.new("Actor")
-	end
-
-	-- Called when an object is "freed", in this case, it's actor needs to be returned to the actor pool
-	local function OnObjectFreed(Object: BasePart)
-		local Actor = ObjectToActor[Object]
-		ObjectToActor[Object] = nil
-
-		if not Actor then
-			return
+	for _, Bone in RootPart:GetDescendants() do
+		if Bone:IsA("Bone") and Bone.Parent:IsA("Bone") and #Bone:GetChildren() == 0 then
+			start = Bone.WorldCFrame
+				+ (Bone.WorldCFrame.UpVector.Unit * (Bone.WorldPosition - Bone.Parent.WorldPosition).Magnitude)
+			tailBone = Instance.new("Bone")
+			tailBone.Parent = Bone
+			tailBone.Name = Bone.Name .. "_Tail"
+			tailBone.WorldCFrame = start
 		end
-
-		Actor.Name = "Pooled Actor"
-
-		table.insert(ActorPool, Actor)
 	end
 
-	local function GatherColliders()
-		local ColliderObjects = {
-			Key = {},
-			Raw = {},
-		}
-
-		for _, Object in CollectionService:GetTagged("SmartCollider") do
-			if not Object:IsA("BasePart") then
-				continue
-			end
-
-			local ColliderKey = Object:GetAttribute("ColliderKey")
-
-			if ColliderKey then
-				ColliderKey = tostring(ColliderKey)
-
-				if not ColliderObjects.Key[ColliderKey] then
-					ColliderObjects.Key[ColliderKey] = {}
-				end
-
-				table.insert(ColliderObjects.Key[ColliderKey], Object)
-			end
-
-			SB_VERBOSE_LOG(`Adding collider: {Object.Name}, Collider Key: {ColliderKey}`)
-			table.insert(ColliderObjects.Raw, Object)
-
-			if Config.YIELD_ON_COLLIDER_GATHER then
-				task.wait()
-			end
+	-- Create particle trees for each group
+	for _, group in ipairs(self.BoneGroups) do
+		for _, Root in ipairs(group.Roots) do
+			self:AppendParticleTree(Root, group.Name)
 		end
-
-		return ColliderObjects
 	end
 
-	local function SetupObject(Object: BasePart)
-		if not Object:IsA("BasePart") then
-			return
-		end
-
-		SB_VERBOSE_LOG(`Setup Object: {Object.Name}`)
-		SB_INDENT_LOG()
-
-		local GlobalColliders = GatherColliders()
-		local ColliderKey = Object:GetAttribute("ColliderKey")
-		local ColliderObjects
-
-		if ColliderKey then
-			ColliderObjects = GlobalColliders.Key[tostring(ColliderKey)] or {}
-		else
-			ColliderObjects = GlobalColliders.Raw or {}
-		end
-
-		local ColliderDescriptions = {} -- {Description, Object}
-
-		for _, ColliderObject in ColliderObjects do
-			table.insert(ColliderDescriptions, { Utilities.GetCollider(ColliderObject), ColliderObject })
-		end
-
-		local Actor = GetActor()
-		local Runtime = ActorRuntime:Clone()
-
-		Runtime.Parent = Actor
-		Runtime.Enabled = true
-
-		Actor.Parent = ActorFolder
-
-		ObjectToActor[Object] = Actor
-
-		-- If we dont yield here a bug happens on occasion where the actor doesn't bind quick enough and misses the setup message
-		task.wait()
-
-		Actor:SendMessage("Setup", Object, ColliderDescriptions, script)
-
-		-- Don't have to cleanup this connection since it's tied to the instance
-		-- Here we handle freeing up the actor attached to the object when it's destroyed
-		Object:GetPropertyChangedSignal("Parent"):Connect(function()
-			if Object.Parent ~= nil then
-				return
-			end
-
-			OnObjectFreed(Object)
-		end)
-
-		SB_VERBOSE_LOG(`Runtime Started`)
-		SB_UNINDENT_LOG()
+	for _, particleTree in self.ParticleTrees do
+		self:AppendParticles(particleTree, particleTree.Root, 0, 0)
 	end
-
-	local TagAddedConnection = CollectionService:GetInstanceAddedSignal("SmartBone"):Connect(SetupObject)
-	local TagRemovedConnection = CollectionService:GetInstanceRemovedSignal("SmartBone"):Connect(OnObjectFreed)
-
-	for _, Object in CollectionService:GetTagged("SmartBone") do
-		SetupObject(Object)
-	end
-
-	if Config.DEBUG_OVERLAY_ENABLED then
-		ImOverlay = CeiveImOverlay.new()
-
-		local PlayerGui = Players.LocalPlayer.PlayerGui
-
-		local DebugGui = Instance.new("ScreenGui")
-		DebugGui.Name = "SmartBoneDebugOverlay"
-		DebugGui.IgnoreGuiInset = true
-		DebugGui.ResetOnSpawn = false
-		DebugGui.Parent = PlayerGui
-
-		ImOverlay.BackFrame.Parent = DebugGui
-
-		RunService.RenderStepped:Connect(function()
-			ImOverlay:Render()
-		end)
-	end
-
-	return {
-		Stop = function()
-			Class.Running = false
-
-			if not Config.RESET_BONE_ON_DESTROY then
-				ActorFolder:Destroy()
-				return
-			end
-
-			for _, Actor: Actor in ActorFolder:GetChildren() do
-				Actor:SendMessage("Destroy")
-			end
-
-			if TagAddedConnection then
-				TagAddedConnection:Disconnect()
-			end
-
-			if TagRemovedConnection then
-				TagRemovedConnection:Disconnect()
-			end
-		end,
-	}
 end
 
-return Class
+function module:AppendParticleTree(Root: Bone, groupName: string)
+	local groupSettings = self.GroupSettings[groupName] or self.Settings
+	table.insert(self.ParticleTrees, ParticleTree.new(Root, self.RootPart, groupSettings.Gravity, groupName))
+end
+
+function module:AppendParticles(particleTree: dictionary, Bone: Bone, ParentIndex: number, BoneLength: number)
+	local Settings = self.GroupSettings[particleTree.GroupName] or self.Settings
+
+	local particle: particle = Particle.new(Bone, particleTree.Root, self.RootPart, Settings, particleTree.GroupName)
+	particle.Position, particle.LastPosition = Bone.WorldPosition, Bone.WorldPosition
+	particle.ParentIndex = ParentIndex
+	particle.BoneLength = BoneLength
+	particle.HeirarchyLength = 0
+	
+	if DEBUG == true then
+		particle.DebugPart = Instance.new("Part")
+		particle.DebugPart.Size = Vector3.new(.1,.1,.1)
+		particle.DebugPart.Anchored = true
+		particle.DebugPart.CanCollide = false
+		particle.DebugPart.CastShadow = false
+		particle.DebugPart.CanTouch = false
+		particle.DebugPart.CanQuery = false
+		particle.DebugPart.Color = Color3.fromRGB(255,0,0)
+		particle.DebugPart.Parent = DEBUG_FOLDER
+	end
+	
+	if ParentIndex >= 1 then
+		BoneLength = (particleTree.Particles[ParentIndex].Bone.WorldPosition - particle.Position).Magnitude
+		particle.BoneLength = BoneLength
+		particle.Weight = (BoneLength * 0.7)
+		particle.HeirarchyLength = Utilities.GetHierarchyLength(Bone, particleTree.Root)
+	end
+
+	if particle.HeirarchyLength <= Settings.AnchorDepth then
+		particle.Anchored = true
+	end
+
+	table.insert(particleTree.Particles, particle)
+
+	local index = #particleTree.Particles
+	local boneChildren = Bone:GetChildren()
+
+	local child
+
+	for i = 1, #boneChildren do
+		child = boneChildren[i]
+		if child:IsA("Bone") then
+			self:AppendParticles(particleTree, child, index, BoneLength)
+		end
+	end
+end
+
+function module:UpdateParameters(setting, value)
+	if not self.Settings[setting] then return end
+	self.Settings[setting] = if SettingsMath[setting] then SettingsMath[setting](value) else value
+end
+
+function module:UpdateGroupParameters(groupName: string, setting, value)
+	if not self.GroupSettings[groupName] then return end
+	if not self.GroupSettings[groupName][setting] then return end
+	self.GroupSettings[groupName][setting] = if SettingsMath[setting] then SettingsMath[setting](value) else value
+end
+
+function module:PreUpdate(particleTree: particleTree)
+	local rootPart = particleTree.RootPart
+	local root = particleTree.Root
+
+	particleTree.ObjectMove = (rootPart.Position - particleTree.ObjectPreviousPosition)
+	particleTree.ObjectPreviousPosition = rootPart.Position
+
+	particleTree.RestGravity = root.CFrame:PointToWorldSpace(particleTree.LocalGravity)
+
+	for _, particle in particleTree.Particles do
+		particle.LastTransformOffset = particle.TransformOffset
+		if particle.Bone == particle.Root then
+			particle.TransformOffset = rootPart.CFrame * particle.RootTransform
+		else
+			particle.TransformOffset = root.WorldCFrame * particle.Transform
+		end
+		particle.LocalTransformOffset = root.CFrame * particle.LocalTransform
+	end
+end
+
+function module:UpdateParticles(particleTree: particleTree, Delta: number, LoopIndex: number)
+	local Settings = self.GroupSettings[particleTree.GroupName] or self.Settings
+
+	local Damping = Settings.Damping
+	local Force = Settings.Gravity
+	local ForceDirection = Settings.Gravity.Unit
+
+	local ProjectedForce = ForceDirection * math.max(particleTree.RestGravity:Dot(ForceDirection), 0)
+
+	Force -= ProjectedForce
+	Force = (Force + Settings.Force) * (self.ObjectScale * Delta)
+
+	local ObjectMove = LoopIndex == 0 and particleTree.ObjectMove or ZERO
+
+	local windMove, velocity, move
+	local timeModifier
+
+	for _, particle in particleTree.Particles do
+		if particle.ParentIndex >= 1 and particle.Anchored == false then
+			windMove = ZERO
+
+			if Settings.WindInfluence > 0 then
+				timeModifier = particleTree.WindOffset
+					+ (os.clock() - (particle.HeirarchyLength / 5))
+					+ (
+						((particle.TransformOffset.Position - particleTree.Root.WorldPosition).Magnitude / 5)
+						* Settings.WindInfluence
+					)
+				windMove = Vector3.new(
+					Settings.WindDirection.X
+						+ (Settings.WindDirection.X * (math.sin(timeModifier * Settings.WindSpeed))),
+					Settings.WindDirection.Y + (0.05 * (math.sin(timeModifier * Settings.WindSpeed))),
+					Settings.WindDirection.Z
+						+ (Settings.WindDirection.X * (math.sin(timeModifier * Settings.WindSpeed)))
+				)
+
+				windMove /= particle.BoneLength
+				windMove *= Settings.WindInfluence
+				windMove *= (Settings.WindStrength / 100) * (math.clamp(particle.HeirarchyLength, 1, 10) / 10)
+				windMove *= particle.Weight
+				self.WindPreviousPosition = windMove
+			end
+
+			velocity = (particle.Position - particle.LastPosition)
+			move = (ObjectMove * Settings.Inertia)
+
+			particle.LastPosition = particle.Position + move
+			particle.Position += velocity * (1 - Damping) + Force + move + windMove
+		else
+			particle.LastPosition = particle.TransformOffset.Position
+			particle.Position = particle.TransformOffset.Position
+		end
+	end
+end
+
+function module:CorrectParticles(particleTree: particleTree, Delta: number)
+	local Settings = self.GroupSettings[particleTree.GroupName] or self.Settings
+	local stiffness = Settings.Stiffness
+
+	local parentPoint
+	local restLength, difference, length
+	local mat, restPosition, maxLength
+
+	for _, point in particleTree.Particles do
+		parentPoint = particleTree.Particles[point.ParentIndex]
+
+		if parentPoint and point.ParentIndex >= 1 and point.Anchored == false then
+			restLength = (parentPoint.TransformOffset.Position - point.TransformOffset.Position).Magnitude
+
+			if stiffness > 0 or Settings.Elasticity > 0 then
+				mat = CFrame.new(parentPoint.Position) * parentPoint.TransformOffset.Rotation
+				restPosition = (mat * CFrame.new(point.LocalTransformOffset.Position)).Position
+
+				difference = restPosition - point.Position
+				point.Position += difference * (Settings.Elasticity * Delta)
+
+				if stiffness > 0 then
+					difference = restPosition - point.Position
+					length = difference.Magnitude
+					maxLength = restLength * (1 - stiffness) * 2
+					if length > maxLength then
+						point.Position += difference * ((length - maxLength) / length)
+					end
+				end
+			end
+
+			difference = parentPoint.Position - point.Position
+			length = difference.Magnitude
+			if length > 0 then
+				point.Position += difference * ((length - restLength) / length)
+			end
+		end
+	end
+end
+
+function module:SkipUpdateParticles(particleTree: particleTree)
+	local Settings = self.GroupSettings[particleTree.GroupName] or self.Settings
+	local parentPoint, restLength, stiffness
+	local restPosition, difference, length, maxLength
+
+	for _, point in particleTree.Particles do
+		if point.ParentIndex >= 1 and not point.Anchored then
+			point.LastPosition += particleTree.ObjectMove
+			point.Position += particleTree.ObjectMove
+
+			parentPoint = particleTree.Particles[point.ParentIndex]
+			restLength = (parentPoint.TransformOffset.Position - point.TransformOffset.Position).Magnitude
+			stiffness = Settings.Stiffness
+
+			if stiffness > 0 then
+				restPosition = parentPoint.Position
+					+ CFrame.lookAt(parentPoint.Position, point.Position).LookVector.Unit
+					* (parentPoint.Position - point.Position).Magnitude
+
+				difference = restPosition - point.Position
+				length = difference.Magnitude
+				maxLength = restLength * (1 - stiffness) * 2
+				if length > maxLength then
+					point.Position += difference * ((length - maxLength) / length)
+				end
+			end
+
+			difference = parentPoint.Position - point.Position
+			length = difference.Magnitude
+			if length > restLength then
+				point.Position += difference * ((length - restLength) / length)
+			end
+		else
+			point.LastPosition = point.TransformOffset.Position
+			point.Position = point.TransformOffset.Position
+		end
+	end
+end
+
+function module:CalculateTransforms(particleTree: particleTree, Delta: number)
+	if self.InRange then
+		local parentPoint, boneParent
+		local localPosition, referenceCFrame, v0, v1, rotation, factor, alpha
+
+		for _, point in particleTree.Particles do
+			if point.ParentIndex >= 1 and point.Anchored == false then
+				parentPoint = particleTree.Particles[point.ParentIndex]
+				boneParent = parentPoint.Bone
+
+				if parentPoint and boneParent and boneParent:IsA("Bone") and boneParent ~= particleTree.Root then
+					localPosition = parentPoint.LocalTransformOffset.Position
+					referenceCFrame = parentPoint.TransformOffset
+					v0 = referenceCFrame:PointToObjectSpace(localPosition)
+					v1 = point.Position - parentPoint.Position
+					rotation = Utilities.GetRotationBetween(referenceCFrame.UpVector, v1, v0).Rotation
+						* referenceCFrame.Rotation
+
+					factor = 0.00001
+					alpha = (1 - factor ^ Delta)
+
+					parentPoint.CalculatedWorldCFrame = boneParent.WorldCFrame:Lerp(CFrame.new(parentPoint.Position) * rotation, alpha)
+				end
+			end
+		end
+	end
+end
+
+function module:TransformBones(particleTree: particleTree)
+	local Settings = self.GroupSettings[particleTree.GroupName] or self.Settings
+	local parentPoint, boneParent
+
+	if self.InRange then
+		for _, point in particleTree.Particles do
+			if point.ParentIndex >= 1 and point.Anchored == false then
+				parentPoint = particleTree.Particles[point.ParentIndex]
+				boneParent = parentPoint.Bone
+
+				if parentPoint and boneParent and boneParent:IsA("Bone") and boneParent ~= particleTree.Root then
+					if parentPoint.Anchored and Settings.AnchorsRotate == false then
+						boneParent.WorldCFrame = parentPoint.TransformOffset
+					else
+						boneParent.WorldCFrame = parentPoint.CalculatedWorldCFrame
+					end
+				end
+			end
+		end
+	end
+end
+
+function module:DEBUG(particleTree: particleTree)
+	for _, point in particleTree.Particles do
+		if point then
+			point.DebugPart.CFrame = CFrame.new(point.Position)
+		end
+	end
+end
+
+function module:RunLoop(particleTree: particleTree, Delta: number, UpdateRate: number)
+	local groupName = particleTree.GroupName
+	local ready = true
+	local timeVar = Delta * 10
+
+	if UpdateRate > 0 then
+		local frameTime = 1 / UpdateRate
+		self.Time[groupName] = (self.Time[groupName] or 0) + Delta
+		ready = false
+
+		if self.Time[groupName] >= frameTime then
+			ready = true
+			self.Time[groupName] = 0
+		end
+	end
+
+	if ready then
+		self:UpdateParticles(particleTree, timeVar, 0)
+		self:CorrectParticles(particleTree, timeVar)
+	else
+		self:SkipUpdateParticles(particleTree)
+	end
+end
+
+function module:ResetParticles(particleTree: particleTree)
+	for _, point in particleTree.Particles do
+		point.LastPosition = point.TransformOffset.Position
+		point.Position = point.TransformOffset.Position
+	end
+end
+
+function module:ResetTransforms(particleTree: particleTree)
+	local transformOffset
+
+	for _, point in particleTree.Particles do
+		if point.Bone == point.Root then
+			transformOffset = particleTree.RootPart.CFrame * point.RootTransform
+		else
+			transformOffset = particleTree.Root.WorldCFrame * point.Transform
+		end
+
+		point.Bone.WorldCFrame = transformOffset
+	end
+end
+
+function module:UpdateBones(Delta: number)
+	for _, particleTree: particleTree in self.ParticleTrees do
+		local Settings = self.GroupSettings[particleTree.GroupName] or self.Settings
+		local UpdateRate = Settings.UpdateRate
+		
+		self:PreUpdate(particleTree, Delta)
+		self:RunLoop(particleTree, Delta, UpdateRate)
+		self:CalculateTransforms(particleTree, Delta)
+	end
+end
+
+function module.Start()
+	local Player = game.Players.LocalPlayer
+
+	local ActorsFolder = Instance.new("Folder")
+	ActorsFolder.Name = "Actors"
+	ActorsFolder.Parent = Player:WaitForChild("PlayerScripts")
+
+	local function DebugPrint(String: string)
+		if DEBUG then
+			warn(String)
+		end
+	end
+
+	local SmartBones = {}
+	local IgnoreList = {}
+
+	local function parseGroups(Object: BasePart): {boneGroup}
+		local groups = {}
+		
+		-- Check for Groups attribute (new system)
+		local groupsAttr = Object:GetAttribute("Groups")
+		if groupsAttr and typeof(groupsAttr) == "string" then
+			local groupNames = string.split(groupsAttr, ",")
+			
+			for _, groupName in ipairs(groupNames) do
+				groupName = string.gsub(groupName, "^%s*(.-)%s*$", "%1") -- trim whitespace
+				
+				-- Get roots for this group
+				local rootsAttr = Object:GetAttribute(groupName .. "_Roots")
+				if rootsAttr and typeof(rootsAttr) == "string" then
+					local rootNames = string.split(rootsAttr, ",")
+					local rootBones = {}
+					
+					for _, rootName in ipairs(rootNames) do
+						rootName = string.gsub(rootName, "^%s*(.-)%s*$", "%1")
+						local bone = Object:FindFirstChild(rootName, true)
+						if bone and bone:IsA("Bone") then
+							table.insert(rootBones, bone)
+						end
+					end
+					
+					if #rootBones > 0 then
+						local groupSettings = {}
+						
+						-- Load group-specific settings from attributes
+						for settingName, defaultValue in pairs(DefaultSettings) do
+							local attrName = groupName .. "_" .. settingName
+							local value = Object:GetAttribute(attrName)
+							if value ~= nil then
+								groupSettings[settingName] = value
+							end
+						end
+						
+						table.insert(groups, {
+							Name = groupName,
+							Roots = rootBones,
+							Settings = groupSettings,
+						})
+					end
+				end
+			end
+		end
+		
+		-- Fallback to old "Roots" system if no groups defined
+		if #groups == 0 then
+			local rootsAttr = Object:GetAttribute("Roots")
+			if rootsAttr and typeof(rootsAttr) == "string" then
+				local rootNames = string.split(rootsAttr, ",")
+				local rootBones = {}
+				
+				for _, rootName in ipairs(rootNames) do
+					rootName = string.gsub(rootName, "^%s*(.-)%s*$", "%1")
+					local bone = Object:FindFirstChild(rootName, true)
+					if bone and bone:IsA("Bone") then
+						table.insert(rootBones, bone)
+					end
+				end
+				
+				if #rootBones > 0 then
+					table.insert(groups, {
+						Name = "Default",
+						Roots = rootBones,
+						Settings = {},
+					})
+				end
+			end
+		end
+		
+		return groups
+	end
+
+	local function registerSmartBoneObject(Object: BasePart)
+		if
+			Object:IsA("BasePart")
+			and Utilities.WaitForChildOfClass(Object, "Bone", 3)
+			and game.Workspace:IsAncestorOf(Object)
+		then
+			local boneGroups = parseGroups(Object)
+
+			if #boneGroups > 0 then
+				local SmartBoneActor = Instance.new("Actor")
+
+				local Event = Instance.new("BindableFunction")
+				Event.Name = "Event"
+				Event.Parent = SmartBoneActor
+
+				local RuntimeScript = script.Dependencies.ActorScript:Clone()
+				RuntimeScript.Name = "Runtime"
+				RuntimeScript.Parent = SmartBoneActor
+
+				SmartBoneActor.Parent = ActorsFolder
+
+				RuntimeScript.Enabled = true
+
+				SmartBones[Object] = SmartBoneActor.Event:Invoke(Object, boneGroups)
+
+				SmartBoneActor.Name = Object.Name .. SmartBones[Object].ID
+
+				SmartBones[Object].RemovedEvent.Event:Once(function()
+					SmartBoneActor.Runtime.Enabled = false
+					SmartBoneActor:Destroy()
+				end)
+
+				table.insert(IgnoreList, Object)
+				DebugPrint("Created new SmartBone Object with ID: " .. SmartBones[Object].ID .. " (" .. #boneGroups .. " groups)")
+			else
+				table.insert(IgnoreList, Object)
+				DebugPrint(
+					"Failed to create SmartBone Object for "
+						.. Object:GetFullName()
+						.. "! Make sure you have defined the Root Bone(s) or Groups for this object!"
+				)
+			end
+		end
+	end
+
+	local function removeSmartBoneObject(Object: BasePart)
+		if SmartBones[Object] then
+			DebugPrint("Removing SmartBone Object with ID: " .. SmartBones[Object].ID)
+			task.spawn(function()
+				for _, Connection in pairs(SmartBones[Object].Connections) do
+					Connection:Disconnect()
+				end
+
+				SmartBones[Object].SimulationConnection:Disconnect()
+
+				task.wait()
+
+				SmartBones[Object].RemovedEvent:Destroy()
+
+				for _, particleTree: particleTree in ipairs(SmartBones[Object].ParticleTrees) do
+					for _, _Particle in particleTree.Particles do
+						for _, Recycling in _Particle.RecyclingBin do
+							Recycling:Destroy()
+						end
+					end
+				end
+
+				task.wait()
+
+				if CurrentControllers[SmartBones[Object].ID] then
+					CurrentControllers[SmartBones[Object].ID] = nil
+				end
+
+				SmartBones[Object].Removed = true
+				SmartBones[Object].RemovedEvent:Fire()
+
+				SmartBones[Object] = nil
+			end)
+		end
+	end
+
+	CollectionService:GetInstanceAddedSignal("SmartBone"):Connect(registerSmartBoneObject)
+	CollectionService:GetInstanceRemovedSignal("SmartBone"):Connect(removeSmartBoneObject)
+
+	for _, Object in pairs(SmartBoneTags) do
+		if not SmartBones[Object] and not table.find(IgnoreList, Object) then
+			task.spawn(function()
+				registerSmartBoneObject(Object)
+			end)
+		end
+	end
+end
+
+return module
